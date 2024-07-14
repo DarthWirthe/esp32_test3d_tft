@@ -8,10 +8,10 @@
 //#include "greatsword.h"
 //#include "dragon_skull.h"
 //#include "shark.h"
-//#include "cat.h"
+#include "cat.h"
 //#include "ball.h"
 //#include "dog.h"
-#include "lol.h"
+//#include "lol.h"
 //#include "skull.h"
 //#include "bicycle1low.h"
 
@@ -25,18 +25,40 @@ TFT_DC   2
 TFT_RST  4
 */
 
+#define INPUT_PIN_BUTTON_1 25
+#define INPUT_PIN_A 34
+#define INPUT_PIN_B 35
+#define ADC_RESOLUTION 12
+#define ADC_MIN 0
+#define ADC_MAX 4096
+
+static uint16_t inputValueA = 0;
+static uint16_t inputValueB = 0;
+static uint16_t inputCalibrationA = 0;
+static uint16_t inputCalibrationB = 0;
+static float accelerationA = 0.0;
+static float accelerationB = 0.0;
+static float translationA = 6.0;
+static float translationB = 0.0;
+static float translationC = 0.0;
+static float rotationA = 0.0;
+static float rotationB = 0.0;
+
+static int controlMode = 0;
+static int stateButton1 = 2;
+static int prevStateButton1 = 0;
+
 #define USE_DMA
 #define COLOR_DEPTH 16
-
+#define TFT_W 128
+#define TFT_H 160
 TFT_eSPI _tft; // TFT_eSPI
-
 //TFT_eSprite _tftdb = TFT_eSprite(&_tft);
-
 TFT_eSprite spr[2] = {TFT_eSprite(&_tft), TFT_eSprite(&_tft) };
-
 bool sprSel = 0;
-
 uint16_t* sprPtr[2];
+
+static const int initialTrinagleBufferSize = 1337;
 
 //Mesh model(thinker::vertexCount, thinker::vertices, 0, 0, thinker::triangleCount, thinker::triangles, thinker::triangleNormals);
 //Mesh model(statue1::vertexCount, statue1::vertices, 0, 0, statue1::triangleCount, statue1::triangles, statue1::triangleNormals);
@@ -44,17 +66,14 @@ uint16_t* sprPtr[2];
 //Mesh model(greatsword::vertexCount, greatsword::vertices, 0, 0, greatsword::triangleCount, greatsword::triangles, greatsword::triangleNormals);
 //Mesh model(dragon_skull::vertexCount, dragon_skull::vertices, 0, 0, dragon_skull::triangleCount, dragon_skull::triangles, dragon_skull::triangleNormals);
 //Mesh model(shark::vertexCount, shark::vertices, 0, 0, shark::triangleCount, shark::triangles, shark::triangleNormals);
-//Mesh model(cat::vertexCount, cat::vertices, 0, 0, cat::triangleCount, cat::triangles, cat::triangleNormals);
+Mesh model(cat::vertexCount, cat::vertices, 0, 0, cat::triangleCount, cat::triangles, cat::triangleNormals);
 //Mesh model(ball::vertexCount, ball::vertices, 0, 0, ball::triangleCount, ball::triangles, ball::triangleNormals);
 //Mesh model(dog::vertexCount, dog::vertices, 0, 0, dog::triangleCount, dog::triangles, dog::triangleNormals);
-Mesh model(lol::vertexCount, lol::vertices, 0, 0, lol::triangleCount, lol::triangles, lol::triangleNormals);
+//Mesh model(lol::vertexCount, lol::vertices, 0, 0, lol::triangleCount, lol::triangles, lol::triangleNormals);
 //Mesh model(skull::vertexCount, skull::vertices, 0, 0, skull::triangleCount, skull::triangles, skull::triangleNormals);
 //Mesh model(bicycle1low::vertexCount, bicycle1low::vertices, 0, 0, bicycle1low::triangleCount, bicycle1low::triangles, bicycle1low::triangleNormals);
 
-Engine3D engine(1337);
-
-#define TFT_W	128
-#define TFT_H	160
+Engine3D engine(initialTrinagleBufferSize);
 
 static inline uint32_t rgb_to_565(uint32_t r, uint32_t g, uint32_t b)
 {
@@ -64,24 +83,95 @@ static inline uint32_t rgb_to_565(uint32_t r, uint32_t g, uint32_t b)
 // Шейдер для треугольников. Используется указатель на эту функцию в 'model'.
 static inline uint32_t triangleShader(int trinangleNo, short *v0, short *v1, short *v2, const signed char *normal, uint32_t color)
 {
-	const uint32_t nx = 200 + (normal[0] * 255) / 960;
-	const uint32_t ny = 200 + (normal[1] * 255) / 960;
-	const uint32_t nz = 200 + (normal[2] * 255) / 960;
+	const uint32_t nx = min(192 + (normal[0] * 255) / 960, 255);
+	const uint32_t ny = min(192 + (normal[1] * 255) / 960, 255);
+	const uint32_t nz = min(192 + (normal[2] * 255) / 960, 255);
 	return rgb_to_565(nx, nz, ny);
 }
 
-void print_free_mem() {
-	multi_heap_info_t mhi;
-	heap_caps_get_info(&mhi, MALLOC_CAP_DEFAULT);
-  	spr[sprSel].print(String("Free") + heap_caps_get_free_size(MALLOC_CAP_DEFAULT) + "B");
+// static void print_free_mem() {
+// 	multi_heap_info_t mhi;
+// 	heap_caps_get_info(&mhi, MALLOC_CAP_DEFAULT);
+//   	spr[sprSel].print(heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+// }
+
+float adcValToAccel(uint16_t v, uint16_t cal)
+{
+	float accel = 0;
+	if (abs(v - cal) < 50) {
+		return 0;
+	}
+	if (v <= cal) {
+		accel = -float((cal - v)) / 32768.0;
+	} else {
+		accel = float((v - cal)) / 32768.0;
+	}
+	return accel;
 }
 
-float rotation1 = 0;
-bool rotation1inc = true;
+static void drawModel()
+{
+	// Перспектива 1:10
+	static Matrix perspective = Matrix::translation(TFT_W / 2, TFT_H / 2, 0) * Matrix::scaling(100.0, 100.0, 100.0) * Matrix::perspective(90.0, 1.0, 10.0);
+	//static float u = 0;
+	//u += 0.005f; // Скорость
+	accelerationA = (accelerationA + adcValToAccel(inputValueA, inputCalibrationA)) / 2;
+	accelerationB = (accelerationB + adcValToAccel(inputValueB, inputCalibrationB)) / 2;
+	if (controlMode == 0) {
+		rotationA += accelerationA;
+		rotationB += accelerationB;
+	} else if (controlMode == 1) {
+		translationA = fmax(fmin(translationA + accelerationA, 24.0), 3.5);
+	} else if (controlMode == 2) {
+		translationC = fmax(fmin(translationC + accelerationA, 16.0), -16.0);
+		translationB = fmax(fmin(translationB - accelerationB, 16.0), -16.0);
+	}
+	// Поворот
+	Matrix rotation = Matrix::rotation(-rotationB, 0, 1.0, 0) * Matrix::rotation(rotationA, 1.0, 0, 0);// * Matrix::rotation(u, 0, 0, 1);
+	Matrix m0 = perspective * Matrix::translation(translationB, translationC, translationA) //* Matrix::translation(, 0, 0) * Matrix::translation(0, , 0)
+		* rotation * Matrix::scaling(6.0);
+	// Преобразование вершин и рёбер
+	model.transform(m0, rotation);
+	engine.begin();
+	model.drawTriangles(engine, 0, triangleShader);
+	engine.end(spr[sprSel]);
+}
+
+void inputTask(void *pvParameter)
+{
+    while(1)
+	{
+        inputValueA = analogRead(INPUT_PIN_A);
+		inputValueB = analogRead(INPUT_PIN_B);
+		if (inputCalibrationA == 0)
+		{
+			inputCalibrationA = inputValueA;
+			inputCalibrationB = inputValueB;
+		}
+
+		stateButton1 = digitalRead(INPUT_PIN_BUTTON_1);
+		if (stateButton1 == 1) {
+			if (prevStateButton1 == 0) {
+				controlMode = controlMode == 2 ? 0 : controlMode + 1;
+				prevStateButton1 = 1;
+			}
+		} else {
+			stateButton1 = 0;
+			prevStateButton1 = 0;
+		}
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // 100 Мс
+    }
+}
 
 //initial setup
 void setup()
 {
+	analogReadResolution(ADC_RESOLUTION);
+	adcAttachPin(INPUT_PIN_A);
+	adcAttachPin(INPUT_PIN_B);
+
+	pinMode(INPUT_PIN_BUTTON_1, INPUT_PULLUP);
 	Serial.begin(115200);
 	_tft.init();
 	spr[0].setColorDepth(COLOR_DEPTH);
@@ -97,59 +187,43 @@ void setup()
   	_tft.initDMA(false);
 #endif
 
-	Serial.print("\nsetup\n");
-	//perfmon_start();
-}
-
-void drawModel()
-{
-	// Перспектива
-	static Matrix perspective = Matrix::translation(TFT_W / 2, TFT_H / 2, 0) * Matrix::scaling(100, 100, 100) * Matrix::perspective(90, 1, 10);
-	static float u = 0;
-	u += 0.005f; // Скорость
-	// Поворот
-	Matrix rotation = Matrix::rotation(-rotation1, 1, 0, 0) * Matrix::rotation(u, 0, 0, 1);
-	Matrix m0 = perspective * Matrix::translation((5 - rotation1) / 2, 0, 7) * rotation * Matrix::scaling(7 * (rotation1 / 4) + 3);
-	//Matrix m0 = perspective * Matrix::translation(0, 0, 7) * rotation * Matrix::scaling(9 + rotation1 * 1.5);
-	// Преобразование вершин и рёбер
-	model.transform(m0, rotation);
-	engine.begin();
-	model.drawTriangles(engine, 0, triangleShader);
-	engine.end(spr[sprSel]);
-}
-
-void loop()
-{
-	static int lastMillis = 0;
-	int t = millis();
-	static float oldFps = 0;
-	float fps = oldFps * 0.9f + 100.f / (t - lastMillis);
-	oldFps = fps;
-	lastMillis = t;
-	spr[sprSel].fillSprite(0);
-	drawModel();
-	spr[sprSel].setCursor(1, 1);
-	spr[sprSel].print(String("fps:") + fps + " t/s:" + int(fps * model.triangleCount));
-	//spr[sprSel].setCursor(2, 12);
-	//print_free_mem();
+	printf("\ninited\n");
 	
-	_tft.startWrite();
-#ifdef USE_DMA
-    _tft.pushImageDMA(0, 0, TFT_W, TFT_H, sprPtr[sprSel]);
-    sprSel = !sprSel;
-#else
-	spr[sprSel].pushSprite(0, 0);
-#endif
-	//_tft.endWrite();
+	
+	xTaskCreate(&inputTask, "adc_task", 2048, NULL, 5, NULL);
+	//perfmon_start();
+	while(1)
+	{
+		static int lastMillis = 0;
+		int t = millis();
+		static float oldFps = 0;
+		float fps = oldFps * 0.9f + 100.f / (t - lastMillis);
+		oldFps = fps;
+		lastMillis = t;
 
-	if (rotation1inc) {
-		rotation1 += 0.005f;
-		if (rotation1 > 5)
-			rotation1inc = false;
-	} else {
-		rotation1 -= 0.005f;
-		if (rotation1 < 0)
-			rotation1inc = true;
+		spr[sprSel].fillSprite(0);
+		drawModel();
+
+		spr[sprSel].setCursor(0, 0);
+		spr[sprSel].setTextColor(TFT_BLACK, TFT_WHITE);
+		spr[sprSel].print(controlMode);
+		spr[sprSel].setTextColor(TFT_WHITE);
+		spr[sprSel].print(" fps:");
+		spr[sprSel].print(int(fps));
+		spr[sprSel].print(" t/s:");
+		spr[sprSel].print(int(fps * model.triangleCount));
+
+		//print_free_mem();
+		
+		_tft.startWrite();
+#ifdef USE_DMA
+		_tft.pushImageDMA(0, 0, TFT_W, TFT_H, sprPtr[sprSel]);
+		sprSel = !sprSel;
+#else
+		spr[sprSel].pushSprite(0, 0);
+#endif
 	}
 }
+
+void loop(){}
 
