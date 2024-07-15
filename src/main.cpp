@@ -1,6 +1,8 @@
 /* */
 
+#include <stdlib.h>
 #include "mesh.h"
+#include <TFT_eSPI.h>
 
 //#include "thinker.h"
 //#include "statue1.h"
@@ -45,8 +47,11 @@ static float rotationA = 0.0;
 static float rotationB = 0.0;
 
 static int controlMode = 0;
+static int renderMode = 0;
 static int stateButton1 = 2;
 static int prevStateButton1 = 0;
+static bool pressedButton1 = false;
+static int64_t timerMsButton1 = 0;
 
 #define USE_DMA
 #define COLOR_DEPTH 16
@@ -66,7 +71,7 @@ static const int initialTrinagleBufferSize = 1337;
 //Mesh model(greatsword::vertexCount, greatsword::vertices, 0, 0, greatsword::triangleCount, greatsword::triangles, greatsword::triangleNormals);
 //Mesh model(dragon_skull::vertexCount, dragon_skull::vertices, 0, 0, dragon_skull::triangleCount, dragon_skull::triangles, dragon_skull::triangleNormals);
 //Mesh model(shark::vertexCount, shark::vertices, 0, 0, shark::triangleCount, shark::triangles, shark::triangleNormals);
-Mesh model(cat::vertexCount, cat::vertices, 0, 0, cat::triangleCount, cat::triangles, cat::triangleNormals);
+Mesh model(cat::vertexCount, cat::vertices, cat::edgeCount, cat::edges, cat::triangleCount, cat::triangles, cat::triangleNormals);
 //Mesh model(ball::vertexCount, ball::vertices, 0, 0, ball::triangleCount, ball::triangles, ball::triangleNormals);
 //Mesh model(dog::vertexCount, dog::vertices, 0, 0, dog::triangleCount, dog::triangles, dog::triangleNormals);
 //Mesh model(lol::vertexCount, lol::vertices, 0, 0, lol::triangleCount, lol::triangles, lol::triangleNormals);
@@ -95,6 +100,7 @@ static inline uint32_t triangleShader(int trinangleNo, short *v0, short *v1, sho
 //   	spr[sprSel].print(heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
 // }
 
+// Положение джойстика с учётом калибровки по середине
 float adcValToAccel(uint16_t v, uint16_t cal)
 {
 	float accel = 0;
@@ -111,10 +117,7 @@ float adcValToAccel(uint16_t v, uint16_t cal)
 
 static void drawModel()
 {
-	// Перспектива 1:10
-	static Matrix perspective = Matrix::translation(TFT_W / 2, TFT_H / 2, 0) * Matrix::scaling(100.0, 100.0, 100.0) * Matrix::perspective(90.0, 1.0, 10.0);
-	//static float u = 0;
-	//u += 0.005f; // Скорость
+	// Управление джойстиком
 	accelerationA = (accelerationA + adcValToAccel(inputValueA, inputCalibrationA)) / 2;
 	accelerationB = (accelerationB + adcValToAccel(inputValueB, inputCalibrationB)) / 2;
 	if (controlMode == 0) {
@@ -126,14 +129,33 @@ static void drawModel()
 		translationC = fmax(fmin(translationC + accelerationA, 16.0), -16.0);
 		translationB = fmax(fmin(translationB - accelerationB, 16.0), -16.0);
 	}
+	// Инициализация единичной матрицы
+	// Перспектива 1:10, угол обзора 90°
+	static Matrix perspective = Matrix::translation(TFT_W / 2, TFT_H / 2, 0) * Matrix::scaling(100.0, 100.0, 100.0) * Matrix::perspective(90.0, 1.0, 10.0);
 	// Поворот
-	Matrix rotation = Matrix::rotation(-rotationB, 0, 1.0, 0) * Matrix::rotation(rotationA, 1.0, 0, 0);// * Matrix::rotation(u, 0, 0, 1);
-	Matrix m0 = perspective * Matrix::translation(translationB, translationC, translationA) //* Matrix::translation(, 0, 0) * Matrix::translation(0, , 0)
-		* rotation * Matrix::scaling(6.0);
-	// Преобразование вершин и рёбер
+	Matrix rotation = Matrix::rotation(-rotationB, 0, 1.0, 0) * Matrix::rotation(rotationA, 1.0, 0, 0);
+	// Перспектива * перемещение * вращение * масштабирование
+	Matrix m0 = perspective * Matrix::translation(translationB, translationC, translationA) * rotation * Matrix::scaling(6.0);
+	// Преобразование вершин, рёбер и нормалий в соответствии с матрицей
 	model.transform(m0, rotation);
+	// Отрисовка модели
 	engine.begin();
-	model.drawTriangles(engine, 0, triangleShader);
+
+	switch (renderMode) {
+		case 0: {
+			model.drawTriangles(engine, 0, triangleShader);
+			break;
+		} 
+		case 1: {
+			model.drawEdges(spr[sprSel], 0xffff);
+			break;
+		}
+		case 2: {
+			model.drawVertices(spr[sprSel], 0xffff);
+			break;
+		}
+		default: {}
+	}
 	engine.end(spr[sprSel]);
 }
 
@@ -141,26 +163,35 @@ void inputTask(void *pvParameter)
 {
     while(1)
 	{
+		// Джойстик
         inputValueA = analogRead(INPUT_PIN_A);
 		inputValueB = analogRead(INPUT_PIN_B);
-		if (inputCalibrationA == 0)
+		if (inputCalibrationA == 0) // Калибровка при запуске
 		{
 			inputCalibrationA = inputValueA;
 			inputCalibrationB = inputValueB;
 		}
 
-		stateButton1 = digitalRead(INPUT_PIN_BUTTON_1);
-		if (stateButton1 == 1) {
-			if (prevStateButton1 == 0) {
+		// Кнопка
+
+		stateButton1 = !digitalRead(INPUT_PIN_BUTTON_1);
+		if (stateButton1 != prevStateButton1) {
+			if (stateButton1 == 1) {
 				controlMode = controlMode == 2 ? 0 : controlMode + 1;
-				prevStateButton1 = 1;
+				pressedButton1 = true;
+				timerMsButton1 = esp_timer_get_time();
+			} else {
+				pressedButton1 = false;
 			}
-		} else {
-			stateButton1 = 0;
-			prevStateButton1 = 0;
+			prevStateButton1 = stateButton1;
+		}
+		
+		if (pressedButton1 == true && esp_timer_get_time() - timerMsButton1 >= 1000000) {
+			renderMode = renderMode == 2 ? 0 : renderMode + 1;
+			pressedButton1 = false;
 		}
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // 100 Мс
+        vTaskDelay(pdMS_TO_TICKS(100)); // Задача неактивна 100 Мс
     }
 }
 
@@ -194,20 +225,20 @@ void setup()
 	//perfmon_start();
 	while(1)
 	{
-		static int lastMillis = 0;
-		int t = millis();
+		static int lastMicros = 0;
+		int t = esp_timer_get_time();
 		static float oldFps = 0;
-		float fps = oldFps * 0.9f + 100.f / (t - lastMillis);
+		float fps = oldFps * 0.9f + 100000.f / (t - lastMicros);
 		oldFps = fps;
-		lastMillis = t;
+		lastMicros = t;
 
 		spr[sprSel].fillSprite(0);
 		drawModel();
 
 		spr[sprSel].setCursor(0, 0);
-		spr[sprSel].setTextColor(TFT_BLACK, TFT_WHITE);
+		spr[sprSel].setTextColor(TFT_BLACK, TFT_GREEN);
 		spr[sprSel].print(controlMode);
-		spr[sprSel].setTextColor(TFT_WHITE);
+		spr[sprSel].setTextColor(TFT_GREEN);
 		spr[sprSel].print(" fps:");
 		spr[sprSel].print(int(fps));
 		spr[sprSel].print(" t/s:");
